@@ -94,12 +94,12 @@ class ACNet(object):
             cell_size = 64
             s = tf.expand_dims(self.s, axis=1,
                                name='timely_input')  # [time_step, feature] => [time_step, batch, feature]
-            # rnn_cell = tf.contrib.rnn.BasicRNNCell(cell_size)
-            lstm_cell = cudnn_rnn.CudnnLSTM(1, cell_size)
-            outputs, _ = lstm_cell(s)
-            # self.init_state = rnn_cell.zero_state(batch_size=1, dtype=tf.float32)
-            # outputs, self.final_state = tf.nn.dynamic_rnn(
-            #     cell=rnn_cell, inputs=s, initial_state=self.init_state, time_major=True)
+            rnn_cell = tf.contrib.rnn.BasicRNNCell(cell_size)
+            # lstm_cell = cudnn_rnn.CudnnLSTM(1, cell_size)
+            # outputs, _ = lstm_cell(s)
+            self.init_state = rnn_cell.zero_state(batch_size=1, dtype=tf.float32)
+            outputs, self.final_state = tf.nn.dynamic_rnn(
+                cell=rnn_cell, inputs=s, initial_state=self.init_state, time_major=True)
 
             cell_out = tf.reshape(outputs, [-1, cell_size], name='flatten_rnn_outputs')  # joined state representation
             l_c = tf.layers.dense(cell_out, 50, tf.nn.relu6, kernel_initializer=w_init, name='lc')
@@ -119,15 +119,15 @@ class ACNet(object):
     def pull_global(self):  # run by a local
         SESS.run([self.pull_a_params_op, self.pull_c_params_op])
 
-    # def choose_action(self, s, cell_state):  # run by a local
-    #     s = s[np.newaxis, :]
-    #     a, cell_state = SESS.run([self.A, self.final_state], {self.s: s, self.init_state: cell_state})
-    #     return a, cell_state
-
-    def choose_action(self, s):  # run by a local
+    def choose_action(self, s, cell_state):  # run by a local
         s = s[np.newaxis, :]
-        a = SESS.run(self.A, {self.s: s})
-        return a
+        a, cell_state = SESS.run([self.A, self.final_state], {self.s: s, self.init_state: cell_state})
+        return a, cell_state
+    #
+    # def choose_action(self, s):  # run by a local
+    #     s = s[np.newaxis, :]
+    #     a = SESS.run(self.A, {self.s: s})
+    #     return a
 
 class Worker(object):
     def __init__(self, name, globalAC):
@@ -142,14 +142,14 @@ class Worker(object):
         while not COORD.should_stop() and GLOBAL_EP < MAX_GLOBAL_EP:
             s = self.env.reset()
             ep_r = 0
-            # rnn_state = SESS.run(self.AC.init_state)    # zero rnn state at beginning
-            # keep_state = rnn_state.copy()       # keep rnn state for updating global net
+            rnn_state = SESS.run(self.AC.init_state)    # zero rnn state at beginning
+            keep_state = rnn_state.copy()       # keep rnn state for updating global net
             for ep_t in range(MAX_EP_STEP):
                 # if self.name == 'W_0':
                 #     self.env.render()
 
-                # a, rnn_state_ = self.AC.choose_action(s, rnn_state)  # get the action and next rnn state
-                a = self.AC.choose_action(s)
+                a, rnn_state_ = self.AC.choose_action(s, rnn_state)  # get the action and next rnn state
+                # a = self.AC.choose_action(s)
                 s_, r, done, info = self.env.step(a)
                 done = True if ep_t == MAX_EP_STEP - 1 else False
 
@@ -162,8 +162,8 @@ class Worker(object):
                     if done:
                         v_s_ = 0   # terminal
                     else:
-                        # v_s_ = SESS.run(self.AC.v, {self.AC.s: s_[np.newaxis, :], self.AC.init_state: rnn_state_})[0, 0]
-                        v_s_ = SESS.run(self.AC.v, {self.AC.s: s_[np.newaxis, :]})[0, 0]
+                        v_s_ = SESS.run(self.AC.v, {self.AC.s: s_[np.newaxis, :], self.AC.init_state: rnn_state_})[0, 0]
+                        # v_s_ = SESS.run(self.AC.v, {self.AC.s: s_[np.newaxis, :]})[0, 0]
 
                     buffer_v_target = []
                     for r in buffer_r[::-1]:    # reverse buffer r
@@ -177,16 +177,16 @@ class Worker(object):
                         self.AC.s: buffer_s,
                         self.AC.a_his: buffer_a,
                         self.AC.v_target: buffer_v_target,
-                        # self.AC.init_state: keep_state,
+                        self.AC.init_state: keep_state,
                     }
 
                     self.AC.update_global(feed_dict)
                     buffer_s, buffer_a, buffer_r = [], [], []
                     self.AC.pull_global()
-                    # keep_state = rnn_state_.copy()   # replace the keep_state as the new initial rnn state_
+                    keep_state = rnn_state_.copy()   # replace the keep_state as the new initial rnn state_
 
                 s = s_
-                # rnn_state = rnn_state_  # renew rnn state
+                rnn_state = rnn_state_  # renew rnn state
                 total_step += 1
 
                 if done:
@@ -230,9 +230,9 @@ if __name__ == "__main__":
         print('start')
         t.start()
         worker_threads.append(t)
-    # COORD.join(worker_threads)
-    for t in worker_threads:
-        t.join()
+    COORD.join(worker_threads)
+    # for t in worker_threads:
+    #     t.join()
     plt.plot(np.arange(len(GLOBAL_RUNNING_R)), GLOBAL_RUNNING_R)
     plt.xlabel('step')
     plt.ylabel('Total moving reward')
